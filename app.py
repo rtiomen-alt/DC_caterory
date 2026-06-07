@@ -3,9 +3,9 @@ import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(layout="wide", page_title="DS Flavor Extractor v2")
+st.set_page_config(layout="wide", page_title="DS Flavor Extractor v3")
 
-st.title("DS Flavor Extractor v2")
+st.title("DS Flavor Extractor v3")
 
 uploaded = st.file_uploader(
     "Загрузить XLS/XLSX/CSV",
@@ -40,6 +40,9 @@ def clean_text(x):
     x = str(x)
 
     x = re.sub(r'[«»"“”]', '', x)
+    x = re.sub(r'\s*\(\s*', ' (', x)
+    x = re.sub(r'\s*\)\s*', ') ', x)
+
     x = re.sub(r'[.,;:]+$', '', x)
     x = re.sub(r'\s+', ' ', x)
 
@@ -56,6 +59,8 @@ def normalize_flavor(flavor):
         "lime": "лайм",
         "mango": "манго",
         "mangosteen": "мангостин",
+        "spritz": "шприц",
+        "aperol": "апероль",
     }
 
     for k, v in replacements.items():
@@ -66,6 +71,8 @@ def normalize_flavor(flavor):
         ("апельсина", "апельсин"),
         ("лимона", "лимон"),
         ("лимонный", "лимон"),
+        ("лимон-лайма", "лимон-лайм"),
+        ("лимон лайма", "лимон-лайм"),
         ("колы", "кола"),
         ("лайма", "лайм"),
         ("манготина", "мангостин"),
@@ -76,10 +83,11 @@ def normalize_flavor(flavor):
 
     for k, v in rules:
         if k in f:
-            f = v
+            f = f.replace(k, v)
 
-    f = re.sub(r'[.,;:]+$', '', f)
     f = re.sub(r'\s+', ' ', f)
+    f = re.sub(r'\s+\)', ')', f)
+    f = re.sub(r'\(\s+', '(', f)
 
     return f.strip().title()
 
@@ -160,26 +168,44 @@ for _, row in df.iterrows():
 
 res = pd.DataFrame(rows)
 
+# Canonical key for duplicate collapse
+res["dup_key"] = (
+    res["Категория"].astype(str).str.lower().str.strip()
+    + "|"
+    + res["Вкус"]
+        .astype(str)
+        .str.lower()
+        .str.replace(r'[^a-zA-Zа-яА-Я0-9]+', '', regex=True)
+)
+
 final = (
-    res.groupby(["Категория", "Вкус"])
+    res.groupby("dup_key")
     .agg({
+        "Категория": "first",
+        "Вкус": "first",
         "Действие с": "min",
         "Действие по": "max",
         "Номер ДС": lambda x: ", ".join(sorted(set(x)))
     })
-    .reset_index()
+    .reset_index(drop=True)
 )
 
 final["Действие с"] = final["Действие с"].dt.strftime("%d.%m.%Y")
 final["Действие по"] = final["Действие по"].dt.strftime("%d.%m.%Y")
 
-st.dataframe(final, use_container_width=True, height=700)
+final = final.sort_values(["Категория", "Вкус"])
+
+st.dataframe(
+    final,
+    use_container_width=True,
+    height=750
+)
 
 csv = final.to_csv(index=False).encode("utf-8-sig")
 
 st.download_button(
     "Скачать CSV",
     csv,
-    file_name="ds_flavors.csv",
+    file_name="ds_flavors_v3.csv",
     mime="text/csv"
 )
