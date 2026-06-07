@@ -3,9 +3,9 @@ import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(layout="wide", page_title="DS Flavor Extractor")
+st.set_page_config(layout="wide", page_title="DS Flavor Extractor v2")
 
-st.title("DS Flavor Extractor MVP")
+st.title("DS Flavor Extractor v2")
 
 uploaded = st.file_uploader(
     "Загрузить XLS/XLSX/CSV",
@@ -26,24 +26,36 @@ else:
 
 df.columns = [str(c).strip() for c in df.columns]
 
-df = df[df["Тип заявителя"].astype(str).str.contains("Изготовитель", case=False, na=False)]
+df = df[
+    df["Тип заявителя"]
+    .astype(str)
+    .str.contains("Изготовитель", case=False, na=False)
+]
+
+def clean_text(x):
+
+    if pd.isna(x):
+        return ""
+
+    x = str(x)
+
+    x = re.sub(r'[«»"“”]', '', x)
+    x = re.sub(r'[.,;:]+$', '', x)
+    x = re.sub(r'\s+', ' ', x)
+
+    return x.strip()
 
 def normalize_flavor(flavor):
 
-    if not flavor:
-        return ""
-
-    f = str(flavor).lower()
+    f = clean_text(flavor).lower()
 
     replacements = {
         "cola": "кола",
         "orange": "апельсин",
         "lemon": "лимон",
-        "cherry": "вишня",
-        "apple": "яблоко",
+        "lime": "лайм",
         "mango": "манго",
-        "grape": "виноград",
-        "barbaris": "барбарис"
+        "mangosteen": "мангостин",
     }
 
     for k, v in replacements.items():
@@ -53,50 +65,55 @@ def normalize_flavor(flavor):
         ("апельсинов", "апельсин"),
         ("апельсина", "апельсин"),
         ("лимона", "лимон"),
-        ("вишни", "вишня"),
-        ("клубники", "клубника"),
-        ("яблока", "яблоко"),
-        ("груши", "груша"),
-        ("барбариса", "барбарис"),
+        ("лимонный", "лимон"),
+        ("колы", "кола"),
+        ("лайма", "лайм"),
+        ("манготина", "мангостин"),
+        ("мангостина", "мангостин"),
+        ("манго-маракуйя", "манго и маракуйя"),
+        ("манго и маракуйи", "манго и маракуйя"),
     ]
 
     for k, v in rules:
         if k in f:
-            return v
+            f = v
+
+    f = re.sub(r'[.,;:]+$', '', f)
+    f = re.sub(r'\s+', ' ', f)
 
     return f.strip().title()
 
 def extract_flavors(text):
 
-    if pd.isna(text):
-        return []
-
-    txt = str(text)
+    txt = clean_text(text)
 
     patterns = [
-        r'со вкусом ([^",;\n]+)',
-        r'вкус ([^",;\n]+)',
-        r'аромат ([^",;\n]+)',
-        r'тип ([^",;\n]+)',
-        r'соус ([^",;\n]+)',
+        r'со вкусом ([^,;\n]+)',
+        r'вкус ([^,;\n]+)',
+        r'аромат ([^,;\n]+)',
+        r'тип ([^,;\n]+)',
+        r'соус ([^,;\n]+)',
     ]
 
     results = []
 
     for p in patterns:
+
         found = re.findall(p, txt, flags=re.IGNORECASE)
 
-        for f in found:
-            nf = normalize_flavor(f)
+        for item in found:
+
+            nf = normalize_flavor(item)
+
             if nf and nf not in results:
                 results.append(nf)
 
     if len(results) == 0:
 
-        tm = re.findall(r'«([^»]+)»', txt)
+        fallback = normalize_flavor(txt)
 
-        for x in tm[:1]:
-            results.append(normalize_flavor(x))
+        if fallback:
+            results.append(fallback)
 
     return results
 
@@ -136,16 +153,12 @@ for _, row in df.iterrows():
         rows.append({
             "Категория": category(row),
             "Вкус": fl,
-            "Действие с": pd.to_datetime(row["Действие с"]),
-            "Действие по": pd.to_datetime(row["Действие по"]),
+            "Действие с": pd.to_datetime(row["Действие с"], errors="coerce"),
+            "Действие по": pd.to_datetime(row["Действие по"], errors="coerce"),
             "Номер ДС": str(row["Регистрационный номер"])
         })
 
 res = pd.DataFrame(rows)
-
-if len(res) == 0:
-    st.warning("Не найдено данных")
-    st.stop()
 
 final = (
     res.groupby(["Категория", "Вкус"])
@@ -160,11 +173,7 @@ final = (
 final["Действие с"] = final["Действие с"].dt.strftime("%d.%m.%Y")
 final["Действие по"] = final["Действие по"].dt.strftime("%d.%m.%Y")
 
-st.dataframe(
-    final,
-    use_container_width=True,
-    height=700
-)
+st.dataframe(final, use_container_width=True, height=700)
 
 csv = final.to_csv(index=False).encode("utf-8-sig")
 
