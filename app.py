@@ -17,28 +17,12 @@ if uploaded is None:
 
 if uploaded.name.endswith(".csv"):
     df = pd.read_csv(uploaded)
+
 elif uploaded.name.endswith(".xls"):
-    import subprocess, tempfile, os
-    tmpdir = tempfile.mkdtemp()
-    src = os.path.join(tmpdir, uploaded.name)
+    df = pd.read_excel(uploaded, engine="xlrd")
 
-    with open(src, "wb") as f:
-        f.write(uploaded.read())
-
-    subprocess.run([
-        "libreoffice",
-        "--headless",
-        "--convert-to",
-        "xlsx",
-        src,
-        "--outdir",
-        tmpdir
-    ])
-
-    xlsx_path = src + "x"
-    df = pd.read_excel(xlsx_path)
 else:
-    df = pd.read_excel(uploaded)
+    df = pd.read_excel(uploaded, engine="openpyxl")
 
 df.columns = [str(c).strip() for c in df.columns]
 
