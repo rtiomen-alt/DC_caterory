@@ -3,9 +3,9 @@ import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(layout="wide", page_title="DS Flavor Extractor v3")
+st.set_page_config(layout="wide", page_title="DS Flavor Extractor v4")
 
-st.title("DS Flavor Extractor v3")
+st.title("DS Flavor Extractor v4")
 
 uploaded = st.file_uploader(
     "Загрузить XLS/XLSX/CSV",
@@ -17,10 +17,8 @@ if uploaded is None:
 
 if uploaded.name.endswith(".csv"):
     df = pd.read_csv(uploaded)
-
 elif uploaded.name.endswith(".xls"):
     df = pd.read_excel(uploaded, engine="xlrd")
-
 else:
     df = pd.read_excel(uploaded, engine="openpyxl")
 
@@ -40,58 +38,57 @@ def clean_text(x):
     x = str(x)
 
     x = re.sub(r'[«»"“”]', '', x)
-    x = re.sub(r'\s*\(\s*', ' (', x)
-    x = re.sub(r'\s*\)\s*', ') ', x)
-
-    x = re.sub(r'[.,;:]+$', '', x)
     x = re.sub(r'\s+', ' ', x)
+    x = re.sub(r'[.,;:]+$', '', x)
 
     return x.strip()
 
-def normalize_flavor(flavor):
+def canonical_flavor(x):
 
-    f = clean_text(flavor).lower()
+    x = clean_text(x).lower()
 
-    replacements = {
+    translit = {
         "cola": "кола",
-        "orange": "апельсин",
         "lemon": "лимон",
         "lime": "лайм",
-        "mango": "манго",
-        "mangosteen": "мангостин",
-        "spritz": "шприц",
-        "aperol": "апероль",
+        "bitter": "биттер",
+        "orange": "апельсин",
     }
 
-    for k, v in replacements.items():
-        f = f.replace(k, v)
+    for k, v in translit.items():
+        x = x.replace(k, v)
 
-    rules = [
-        ("апельсинов", "апельсин"),
-        ("апельсина", "апельсин"),
-        ("лимона", "лимон"),
-        ("лимонный", "лимон"),
+    # normalize variants
+    replacements = [
+        ("биттер лимон", "биттер лимон"),
+        ("биттер lemon", "биттер лимон"),
+        ("bitter лимон", "биттер лимон"),
         ("лимон-лайма", "лимон-лайм"),
         ("лимон лайма", "лимон-лайм"),
         ("колы", "кола"),
-        ("лайма", "лайм"),
-        ("манготина", "мангостин"),
-        ("мангостина", "мангостин"),
-        ("манго-маракуйя", "манго и маракуйя"),
-        ("манго и маракуйи", "манго и маракуйя"),
+        ("апельсина", "апельсин"),
     ]
 
-    for k, v in rules:
-        if k in f:
-            f = f.replace(k, v)
+    for k, v in replacements:
+        x = x.replace(k, v)
 
-    f = re.sub(r'\s+', ' ', f)
-    f = re.sub(r'\s+\)', ')', f)
-    f = re.sub(r'\(\s+', '(', f)
+    # remove generic product garbage
+    garbage = [
+        "напитки безалкогольные негазированные",
+        "торговых марок",
+        "радуга",
+    ]
 
-    return f.strip().title()
+    for g in garbage:
+        x = x.replace(g, "")
 
-def extract_flavors(text):
+    x = re.sub(r'\([^)]*\)', '', x)
+    x = re.sub(r'[^a-zа-я0-9\s\-]', '', x)
+    x = re.sub(r'\s+', ' ', x)
+
+    return x.strip().title()
+
+def extract_flavor(text):
 
     txt = clean_text(text)
 
@@ -100,30 +97,15 @@ def extract_flavors(text):
         r'вкус ([^,;\n]+)',
         r'аромат ([^,;\n]+)',
         r'тип ([^,;\n]+)',
-        r'соус ([^,;\n]+)',
     ]
 
-    results = []
-
     for p in patterns:
-
         found = re.findall(p, txt, flags=re.IGNORECASE)
 
-        for item in found:
+        if found:
+            return canonical_flavor(found[0])
 
-            nf = normalize_flavor(item)
-
-            if nf and nf not in results:
-                results.append(nf)
-
-    if len(results) == 0:
-
-        fallback = normalize_flavor(txt)
-
-        if fallback:
-            results.append(fallback)
-
-    return results
+    return canonical_flavor(txt)
 
 def category(row):
 
@@ -134,52 +116,45 @@ def category(row):
         str(row.get("Наименование (обозначение) продукции", ""))
     ]).lower()
 
-    if "энерг" in txt:
-        return "Энергетики"
-
     if "лимонад" in txt:
         return "Лимонады"
+
+    if "энерг" in txt:
+        return "Энергетики"
 
     if "сок" in txt:
         return "Соки"
 
-    if "напит" in txt:
-        return "Безалкогольные напитки"
-
-    return "Прочее"
+    return "Безалкогольные напитки"
 
 rows = []
 
 for _, row in df.iterrows():
 
-    flavors = extract_flavors(
+    flavor = extract_flavor(
         row.get("Наименование (обозначение) продукции", "")
     )
 
-    for fl in flavors:
-
-        rows.append({
-            "Категория": category(row),
-            "Вкус": fl,
-            "Действие с": pd.to_datetime(row["Действие с"], errors="coerce"),
-            "Действие по": pd.to_datetime(row["Действие по"], errors="coerce"),
-            "Номер ДС": str(row["Регистрационный номер"])
-        })
+    rows.append({
+        "Категория": category(row),
+        "Вкус": flavor,
+        "Действие с": pd.to_datetime(row["Действие с"], errors="coerce"),
+        "Действие по": pd.to_datetime(row["Действие по"], errors="coerce"),
+        "Номер ДС": str(row["Регистрационный номер"])
+    })
 
 res = pd.DataFrame(rows)
 
-# Canonical key for duplicate collapse
-res["dup_key"] = (
-    res["Категория"].astype(str).str.lower().str.strip()
+res["key"] = (
+    res["Категория"].str.lower().str.strip()
     + "|"
     + res["Вкус"]
-        .astype(str)
         .str.lower()
-        .str.replace(r'[^a-zA-Zа-яА-Я0-9]+', '', regex=True)
+        .str.replace(r'[^a-zа-я0-9]+', '', regex=True)
 )
 
 final = (
-    res.groupby("dup_key")
+    res.groupby("key")
     .agg({
         "Категория": "first",
         "Вкус": "first",
@@ -195,17 +170,13 @@ final["Действие по"] = final["Действие по"].dt.strftime("%d.
 
 final = final.sort_values(["Категория", "Вкус"])
 
-st.dataframe(
-    final,
-    use_container_width=True,
-    height=750
-)
+st.dataframe(final, use_container_width=True, height=750)
 
 csv = final.to_csv(index=False).encode("utf-8-sig")
 
 st.download_button(
     "Скачать CSV",
     csv,
-    file_name="ds_flavors_v3.csv",
+    file_name="ds_flavors_v4.csv",
     mime="text/csv"
 )
