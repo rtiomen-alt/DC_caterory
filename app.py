@@ -3,9 +3,9 @@ import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(layout="wide", page_title="OKVED Flavor Service v4.1")
+st.set_page_config(layout="wide", page_title="OKVED Flavor Service v4.2")
 
-st.title("OKVED Flavor Service v4.1")
+st.title("OKVED Flavor Service v4.2")
 
 ALLOWED_OKVED = ["11.07", "10.32", "11.03", "11.02"]
 
@@ -51,7 +51,6 @@ for _, row in df.iterrows():
         valid = False
 
         for allowed in ALLOWED_OKVED:
-
             if okv.startswith(allowed):
                 valid = True
                 break
@@ -129,13 +128,9 @@ MORPH = {
 
 PAIR_RULES = {
     "лимон лайм": "лимон лайм",
-    "лимон и лайм": "лимон лайм",
     "манго мангостин": "манго мангостин",
-    "манго и мангостин": "манго мангостин",
     "клубника земляника": "клубника земляника",
-    "клубника и земляника": "клубника земляника",
     "гуава мята": "гуава мята",
-    "гуава и мята": "гуава мята",
 }
 
 def normalize_flavor(raw):
@@ -157,13 +152,13 @@ def normalize_flavor(raw):
         if k in x:
             x = v
 
-    words = []
+    uniq = []
 
     for w in x.split():
-        if w not in words:
-            words.append(w)
+        if w not in uniq:
+            uniq.append(w)
 
-    x = " ".join(words)
+    x = " ".join(uniq)
 
     return x.strip().title()
 
@@ -175,24 +170,47 @@ def canonical_key(x):
 
     return x
 
-def extract_product_head(text):
+TEA_MARKERS = [
+    "чай",
+    "tea",
+    "ice tea",
+    "green tea",
+    "black tea",
+    "чайный",
+    "чайный напиток",
+    "экстракт чая",
+    "матча",
+    "улун",
+    "пуэр",
+    "каркаде",
+    "жасминовый чай",
+]
 
-    txt = clean_text(text)
+COFFEE_MARKERS = [
+    "кофе",
+    "coffee",
+    "кофейный напиток",
+    "латте",
+    "капучино",
+    "cappuccino",
+    "espresso",
+    "эспрессо",
+    "cold brew",
+    "раф",
+    "мокко",
+]
 
-    splitters = [
-        "со вкусом",
-        "вкус",
-        "аромат",
-        "тип",
-    ]
+ENERGY_MARKERS = [
+    "энергетичес",
+    "тонизирующ",
+    "energy drink",
+]
 
-    for s in splitters:
-
-        if s in txt:
-            txt = txt.split(s)[0]
-            break
-
-    return txt[:150]
+ISOTONIC_MARKERS = [
+    "изотони",
+    "isotonic",
+    "electrolyte",
+]
 
 def detect_product_type(row):
 
@@ -203,69 +221,54 @@ def detect_product_type(row):
 
     full_text = clean_text(full_text)
 
-    head = extract_product_head(full_text)
+    # semantic-first classification
+
+    for marker in ENERGY_MARKERS:
+        if marker in full_text:
+            return "Энергетические безалкогольные напитки"
+
+    for marker in ISOTONIC_MARKERS:
+        if marker in full_text:
+            return "Спортивные изотонические напитки"
+
+    for marker in TEA_MARKERS:
+        if marker in full_text:
+            return "Холодные чаи и кофейные напитки"
+
+    for marker in COFFEE_MARKERS:
+        if marker in full_text:
+            return "Холодные чаи и кофейные напитки"
+
+    # fallback by okved
 
     okveds = extract_okved(row)
 
     if any(x.startswith("11.07") for x in okveds):
-
-        # strict energy detection
-        if re.search(
-            r'энергетичес|тонизирующ|energy drink',
-            head
-        ):
-            return "Энергетические безалкогольные напитки"
-
-        # isotonic detection
-        if re.search(
-            r'изотони|isotonic|electrolyte',
-            full_text
-        ):
-            return "Спортивные изотонические напитки"
-
-        # tea / coffee detection
-        tea_markers = [
-            "чай",
-            "tea",
-            "ice tea",
-            "green tea",
-            "black tea",
-            "чайный напиток",
-            "экстракт чая",
-            "кофе",
-            "coffee",
-            "кофейный напиток",
-        ]
-
-        for marker in tea_markers:
-            if marker in full_text:
-                return "Холодные чаи и кофейные напитки"
-
         return "Газированные и негазированные сладкие напитки"
 
     if any(x.startswith("10.32") for x in okveds):
 
-        if "морс" in head:
+        if "морс" in full_text:
             return "Морсы"
 
-        if "концентрат" in head:
+        if "концентрат" in full_text:
             return "Концентраты"
 
         return "Фруктовые и овощные соки"
 
     if any(x.startswith("11.03") for x in okveds):
 
-        if "сидр" in head:
+        if "сидр" in full_text:
             return "Сидры"
 
-        if "медовух" in head:
+        if "медовух" in full_text:
             return "Медовуха"
 
         return "Плодово ягодные напитки"
 
     if any(x.startswith("11.02") for x in okveds):
 
-        if "игрист" in head or "шампан" in head:
+        if "игрист" in full_text or "шампан" in full_text:
             return "Игристые и шампанское"
 
         return "Вина"
@@ -360,6 +363,6 @@ csv = final.to_csv(index=False).encode("utf-8-sig")
 st.download_button(
     "Скачать CSV",
     csv,
-    file_name="okved_flavors_v41.csv",
+    file_name="okved_flavors_v42.csv",
     mime="text/csv"
 )
