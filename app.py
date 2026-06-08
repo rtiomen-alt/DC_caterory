@@ -3,9 +3,9 @@ import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(layout="wide", page_title="OKVED Flavor Service v4")
+st.set_page_config(layout="wide", page_title="OKVED Flavor Service v4.1")
 
-st.title("OKVED Flavor Service v4")
+st.title("OKVED Flavor Service v4.1")
 
 ALLOWED_OKVED = ["11.07", "10.32", "11.03", "11.02"]
 
@@ -103,52 +103,37 @@ EN_RU = {
     "guava": "гуава",
     "mint": "мята",
     "strawberry": "клубника",
-    "forest berry": "лесная ягода",
 }
 
 MORPH = {
     "биттер лемон": "биттер лимон",
-
     "вишни": "вишня",
     "вишневый": "вишня",
-
     "грейпфрута": "грейпфрут",
-
     "гуавы": "гуава",
     "мяты": "мята",
-
     "зеленого яблока": "зеленое яблоко",
-
     "клубники": "клубника",
-
     "земляники": "земляника",
-
     "лесные ягоды": "лесная ягода",
     "лесных ягод": "лесная ягода",
-
     "лимона": "лимон",
     "лайма": "лайм",
-
     "мангостина": "мангостин",
     "манготина": "мангостин",
-
     "апельсиновый": "апельсин",
     "апельсина": "апельсин",
     "апельсинка": "апельсин",
-
     "колы": "кола",
 }
 
 PAIR_RULES = {
     "лимон лайм": "лимон лайм",
     "лимон и лайм": "лимон лайм",
-
     "манго мангостин": "манго мангостин",
     "манго и мангостин": "манго мангостин",
-
     "клубника земляника": "клубника земляника",
     "клубника и земляника": "клубника земляника",
-
     "гуава мята": "гуава мята",
     "гуава и мята": "гуава мята",
 }
@@ -172,16 +157,13 @@ def normalize_flavor(raw):
         if k in x:
             x = v
 
-    words = x.split()
+    words = []
 
-    cleaned = []
+    for w in x.split():
+        if w not in words:
+            words.append(w)
 
-    for w in words:
-
-        if w not in cleaned:
-            cleaned.append(w)
-
-    x = " ".join(cleaned)
+    x = " ".join(words)
 
     return x.strip().title()
 
@@ -210,50 +192,81 @@ def extract_product_head(text):
             txt = txt.split(s)[0]
             break
 
-    return txt[:120]
+    return txt[:150]
 
 def detect_product_type(row):
 
-    txt = " ".join([
+    full_text = " ".join([
         str(row.get("Общее наименование продукции", "")),
         str(row.get("Наименование (обозначение) продукции", ""))
     ])
 
-    head = extract_product_head(txt)
+    full_text = clean_text(full_text)
+
+    head = extract_product_head(full_text)
 
     okveds = extract_okved(row)
 
     if any(x.startswith("11.07") for x in okveds):
 
-        if re.search(r'энергетичес|тонизирующ|energy drink', head):
-            return "Энергетики"
+        # strict energy detection
+        if re.search(
+            r'энергетичес|тонизирующ|energy drink',
+            head
+        ):
+            return "Энергетические безалкогольные напитки"
 
-        if re.search(r'холодный чай|ice tea|чай', head):
-            return "Холодные чаи"
+        # isotonic detection
+        if re.search(
+            r'изотони|isotonic|electrolyte',
+            full_text
+        ):
+            return "Спортивные изотонические напитки"
 
-        if re.search(r'изотони', head):
-            return "Изотоники"
+        # tea / coffee detection
+        tea_markers = [
+            "чай",
+            "tea",
+            "ice tea",
+            "green tea",
+            "black tea",
+            "чайный напиток",
+            "экстракт чая",
+            "кофе",
+            "coffee",
+            "кофейный напиток",
+        ]
 
-        return "Газированные напитки"
+        for marker in tea_markers:
+            if marker in full_text:
+                return "Холодные чаи и кофейные напитки"
+
+        return "Газированные и негазированные сладкие напитки"
 
     if any(x.startswith("10.32") for x in okveds):
 
         if "морс" in head:
             return "Морсы"
 
-        return "Соки"
+        if "концентрат" in head:
+            return "Концентраты"
+
+        return "Фруктовые и овощные соки"
 
     if any(x.startswith("11.03") for x in okveds):
 
         if "сидр" in head:
             return "Сидры"
 
-        return "Плодовые вина"
+        if "медовух" in head:
+            return "Медовуха"
+
+        return "Плодово ягодные напитки"
 
     if any(x.startswith("11.02") for x in okveds):
 
         if "игрист" in head or "шампан" in head:
-            return "Игристые"
+            return "Игристые и шампанское"
 
         return "Вина"
 
@@ -347,6 +360,6 @@ csv = final.to_csv(index=False).encode("utf-8-sig")
 st.download_button(
     "Скачать CSV",
     csv,
-    file_name="okved_flavors_v4.csv",
+    file_name="okved_flavors_v41.csv",
     mime="text/csv"
 )
