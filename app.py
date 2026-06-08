@@ -3,9 +3,9 @@ import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(layout="wide", page_title="OKVED Flavor Service v4.2")
+st.set_page_config(layout="wide", page_title="OKVED Flavor Service v5.0")
 
-st.title("OKVED Flavor Service v4.2")
+st.title("OKVED Flavor Service v5.0 — SKU-based Classification")
 
 ALLOWED_OKVED = ["11.07", "10.32", "11.03", "11.02"]
 
@@ -31,6 +31,22 @@ df = df[
     .astype(str)
     .str.contains("Изготовитель", case=False, na=False)
 ]
+
+def clean_text(x):
+
+    if pd.isna(x):
+        return ""
+
+    x = str(x)
+
+    x = re.sub(r'[«»“”"]', '', x)
+
+    x = x.replace("\n", " ")
+    x = x.replace("\r", " ")
+
+    x = re.sub(r'\s+', ' ', x)
+
+    return x.strip()
 
 def extract_okved(row):
 
@@ -73,23 +89,6 @@ if bad_okveds:
 
 st.success("Все ОКВЭД разрешены")
 
-def clean_text(x):
-
-    if pd.isna(x):
-        return ""
-
-    x = str(x).lower()
-
-    x = re.sub(r'[«»"“”]', '', x)
-    x = re.sub(r'\([^)]*\)', '', x)
-
-    x = x.replace("-", " ")
-    x = x.replace("/", " ")
-
-    x = re.sub(r'\s+', ' ', x)
-
-    return x.strip()
-
 EN_RU = {
     "cola": "кола",
     "lemon": "лимон",
@@ -102,12 +101,13 @@ EN_RU = {
     "guava": "гуава",
     "mint": "мята",
     "strawberry": "клубника",
+    "tea": "чай",
+    "coffee": "кофе",
 }
 
 MORPH = {
     "биттер лемон": "биттер лимон",
     "вишни": "вишня",
-    "вишневый": "вишня",
     "грейпфрута": "грейпфрут",
     "гуавы": "гуава",
     "мяты": "мята",
@@ -120,22 +120,23 @@ MORPH = {
     "лайма": "лайм",
     "мангостина": "мангостин",
     "манготина": "мангостин",
-    "апельсиновый": "апельсин",
     "апельсина": "апельсин",
-    "апельсинка": "апельсин",
+    "апельсиновый": "апельсин",
     "колы": "кола",
 }
 
 PAIR_RULES = {
     "лимон лайм": "лимон лайм",
+    "лимон и лайм": "лимон лайм",
     "манго мангостин": "манго мангостин",
+    "манго и мангостин": "манго мангостин",
     "клубника земляника": "клубника земляника",
     "гуава мята": "гуава мята",
 }
 
-def normalize_flavor(raw):
+def normalize_flavor(x):
 
-    x = clean_text(raw)
+    x = clean_text(x).lower()
 
     for k, v in EN_RU.items():
         x = x.replace(k, v)
@@ -143,6 +144,8 @@ def normalize_flavor(raw):
     for k, v in MORPH.items():
         x = x.replace(k, v)
 
+    x = x.replace("-", " ")
+    x = x.replace("/", " ")
     x = x.replace(" и ", " ")
 
     x = re.sub(r'[^a-zа-я0-9\s]', ' ', x)
@@ -152,13 +155,13 @@ def normalize_flavor(raw):
         if k in x:
             x = v
 
-    uniq = []
+    words = []
 
     for w in x.split():
-        if w not in uniq:
-            uniq.append(w)
+        if w not in words:
+            words.append(w)
 
-    x = " ".join(uniq)
+    x = " ".join(words)
 
     return x.strip().title()
 
@@ -172,38 +175,29 @@ def canonical_key(x):
 
 TEA_MARKERS = [
     "чай",
-    "tea",
     "ice tea",
     "green tea",
     "black tea",
-    "чайный",
-    "чайный напиток",
-    "экстракт чая",
     "матча",
     "улун",
     "пуэр",
     "каркаде",
-    "жасминовый чай",
 ]
 
 COFFEE_MARKERS = [
     "кофе",
-    "coffee",
-    "кофейный напиток",
     "латте",
     "капучино",
-    "cappuccino",
     "espresso",
     "эспрессо",
     "cold brew",
     "раф",
-    "мокко",
 ]
 
 ENERGY_MARKERS = [
     "энергетичес",
-    "тонизирующ",
     "energy drink",
+    "тонизирующ",
 ]
 
 ISOTONIC_MARKERS = [
@@ -212,128 +206,143 @@ ISOTONIC_MARKERS = [
     "electrolyte",
 ]
 
-def detect_product_type(row):
+def split_into_skus(text):
 
-    full_text = " ".join([
-        str(row.get("Общее наименование продукции", "")),
-        str(row.get("Наименование (обозначение) продукции", ""))
-    ])
+    text = clean_text(text)
 
-    full_text = clean_text(full_text)
+    parts = re.split(r';|•|\n', text)
 
-    # semantic-first classification
+    result = []
 
-    for marker in ENERGY_MARKERS:
-        if marker in full_text:
+    for p in parts:
+
+        p = p.strip()
+
+        if len(p) < 3:
+            continue
+
+        result.append(p)
+
+    return result
+
+def classify_sku(sku, okveds):
+
+    sku_l = sku.lower()
+
+    for m in ENERGY_MARKERS:
+        if m in sku_l:
             return "Энергетические безалкогольные напитки"
 
-    for marker in ISOTONIC_MARKERS:
-        if marker in full_text:
+    for m in ISOTONIC_MARKERS:
+        if m in sku_l:
             return "Спортивные изотонические напитки"
 
-    for marker in TEA_MARKERS:
-        if marker in full_text:
+    for m in TEA_MARKERS:
+        if m in sku_l:
             return "Холодные чаи и кофейные напитки"
 
-    for marker in COFFEE_MARKERS:
-        if marker in full_text:
+    for m in COFFEE_MARKERS:
+        if m in sku_l:
             return "Холодные чаи и кофейные напитки"
-
-    # fallback by okved
-
-    okveds = extract_okved(row)
 
     if any(x.startswith("11.07") for x in okveds):
         return "Газированные и негазированные сладкие напитки"
 
     if any(x.startswith("10.32") for x in okveds):
 
-        if "морс" in full_text:
+        if "морс" in sku_l:
             return "Морсы"
 
-        if "концентрат" in full_text:
+        if "концентрат" in sku_l:
             return "Концентраты"
 
         return "Фруктовые и овощные соки"
 
     if any(x.startswith("11.03") for x in okveds):
 
-        if "сидр" in full_text:
+        if "сидр" in sku_l:
             return "Сидры"
 
-        if "медовух" in full_text:
+        if "медовух" in sku_l:
             return "Медовуха"
 
         return "Плодово ягодные напитки"
 
     if any(x.startswith("11.02") for x in okveds):
 
-        if "игрист" in full_text or "шампан" in full_text:
+        if "игрист" in sku_l or "шампан" in sku_l:
             return "Игристые и шампанское"
 
         return "Вина"
 
     return "Прочее"
 
-def extract_flavors(row):
+def extract_flavor_from_sku(sku):
 
-    txt = " ".join([
-        str(row.get("Общее наименование продукции", "")),
-        str(row.get("Наименование (обозначение) продукции", ""))
-    ])
-
-    txt = clean_text(txt)
+    txt = sku.lower()
 
     patterns = [
-        r'со вкусом ([^,.;\n]+)',
-        r'вкус ([^,.;\n]+)',
-        r'аромат ([^,.;\n]+)',
-        r'тип ([^,.;\n]+)',
+        r'со вкусом ([^,.;]+)',
+        r'вкус ([^,.;]+)',
+        r'аромат ([^,.;]+)',
+        r'([а-яa-z\s]+чай[а-яa-z\s]*)',
     ]
-
-    found = []
 
     for p in patterns:
 
         matches = re.findall(p, txt, flags=re.IGNORECASE)
 
-        for m in matches:
+        if matches:
 
-            flavor = normalize_flavor(m)
+            flavor = normalize_flavor(matches[0])
 
-            if (
-                len(flavor) > 1
-                and len(flavor.split()) <= 5
-                and flavor not in found
-            ):
-                found.append(flavor)
+            if len(flavor) > 1:
+                return flavor
 
-    if not found:
+    txt = re.sub(
+        r'напиток|безалкогольный|газированный|негазированный',
+        '',
+        txt
+    )
 
-        fallback = normalize_flavor(txt)
+    txt = normalize_flavor(txt)
 
-        if len(fallback.split()) <= 4:
-            found.append(fallback)
+    words = txt.split()
 
-    return found
+    if len(words) > 5:
+        txt = " ".join(words[:5])
+
+    return txt
 
 rows = []
 
 for _, row in df.iterrows():
 
-    product_type = detect_product_type(row)
+    full_text = " ".join([
+        str(row.get("Общее наименование продукции", "")),
+        str(row.get("Наименование (обозначение) продукции", ""))
+    ])
 
-    flavors = extract_flavors(row)
+    skus = split_into_skus(full_text)
 
-    for fl in flavors:
+    okveds = extract_okved(row)
+
+    for sku in skus:
+
+        product_type = classify_sku(sku, okveds)
+
+        flavor = extract_flavor_from_sku(sku)
+
+        if len(flavor.strip()) < 2:
+            continue
 
         rows.append({
             "Вид продукции": product_type,
-            "Вкус": fl,
+            "Вкус": flavor,
             "CanonicalKey": (
                 product_type.lower()
                 + "|"
-                + canonical_key(fl)
+                + canonical_key(flavor)
             ),
             "Номер ДС": str(row["Регистрационный номер"])
         })
@@ -363,6 +372,6 @@ csv = final.to_csv(index=False).encode("utf-8-sig")
 st.download_button(
     "Скачать CSV",
     csv,
-    file_name="okved_flavors_v42.csv",
+    file_name="okved_flavors_v50.csv",
     mime="text/csv"
 )
