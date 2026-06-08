@@ -1,11 +1,12 @@
-
 import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(layout="wide", page_title="DS Flavor Extractor v5")
+st.set_page_config(layout="wide", page_title="OKVED Flavor Service")
 
-st.title("DS Flavor Extractor v5")
+st.title("OKVED Flavor Service")
+
+ALLOWED_OKVED = ["11.07", "10.32", "11.03", "11.02"]
 
 uploaded = st.file_uploader(
     "Загрузить XLS/XLSX/CSV",
@@ -30,14 +31,58 @@ df = df[
     .str.contains("Изготовитель", case=False, na=False)
 ]
 
+def extract_okved(row):
+
+    cols = [c for c in df.columns if "оквэд" in c.lower()]
+
+    txt = " ".join([
+        str(row.get(c, "")) for c in cols
+    ])
+
+    return re.findall(r'\d+\.\d+(?:\.\d+)?', txt)
+
+bad_okveds = set()
+
+for _, row in df.iterrows():
+
+    okveds = extract_okved(row)
+
+    for okv in okveds:
+
+        valid = False
+
+        for allowed in ALLOWED_OKVED:
+
+            if okv.startswith(allowed):
+                valid = True
+                break
+
+        if not valid:
+            bad_okveds.add(okv)
+
+if bad_okveds:
+
+    st.error("Обнаружены ОКВЭД вне списка")
+
+    st.dataframe(
+        pd.DataFrame({
+            "Неразрешенные ОКВЭД": sorted(bad_okveds)
+        }),
+        use_container_width=True
+    )
+
+    st.stop()
+
+st.success("Все ОКВЭД разрешены")
+
 def clean_text(x):
 
     if pd.isna(x):
         return ""
 
-    x = str(x)
+    x = str(x).lower()
 
-    x = re.sub(r'[«»"“”]', '', x)
+    x = re.sub(r'[«»\"“”]', '', x)
     x = re.sub(r'\([^)]*\)', '', x)
     x = re.sub(r'\s+', ' ', x)
 
@@ -45,30 +90,22 @@ def clean_text(x):
 
 def normalize_flavor(x):
 
-    x = clean_text(x).lower()
+    x = clean_text(x)
 
-    replacements = {
+    repl = {
         "cola": "кола",
+        "orange": "апельсин",
         "lemon": "лимон",
         "lime": "лайм",
-        "orange": "апельсин",
-        "bitter": "биттер",
-        "spritz": "шприц",
-        "aperol": "апероль",
-    }
-
-    for k, v in replacements.items():
-        x = x.replace(k, v)
-
-    rules = {
-        "биттер лемон": "биттер лимон",
-        "лимона": "лимон",
+        "apple": "яблоко",
+        "апельсиновый": "апельсин",
         "апельсина": "апельсин",
+        "апельсинка": "апельсин",
+        "лимона": "лимон",
         "колы": "кола",
-        "лайма": "лайм",
     }
 
-    for k, v in rules.items():
+    for k, v in repl.items():
         x = x.replace(k, v)
 
     x = re.sub(r'[^a-zа-я0-9\s\-]', ' ', x)
@@ -76,29 +113,65 @@ def normalize_flavor(x):
 
     return x.strip().title()
 
-def category(row):
+def product_type(row):
 
     txt = " ".join([
-        str(row.get("ОКВЭД название", "")),
-        str(row.get("Группа продукции", "")),
         str(row.get("Общее наименование продукции", "")),
         str(row.get("Наименование (обозначение) продукции", ""))
     ]).lower()
 
-    if "лимонад" in txt:
-        return "Лимонады"
+    okveds = extract_okved(row)
 
-    if "энерг" in txt:
-        return "Энергетики"
+    if any(x.startswith("10.32") for x in okveds):
 
-    if "сок" in txt:
+        if "морс" in txt:
+            return "Морсы"
+
         return "Соки"
 
-    return "Безалкогольные напитки"
+    if any(x.startswith("11.03") for x in okveds):
 
-def extract_flavors(text):
+        if "сидр" in txt:
+            return "Сидры"
 
-    txt = clean_text(text)
+        if "медовух" in txt:
+            return "Медовуха"
+
+        return "Плодовые вина"
+
+    if any(x.startswith("11.02") for x in okveds):
+
+        if "игрист" in txt or "шампан" in txt:
+            return "Игристые"
+
+        return "Вина"
+
+    if any(x.startswith("11.07") for x in okveds):
+
+        if "энерг" in txt:
+            return "Энергетики"
+
+        if "чай" in txt:
+            return "Холодные чаи"
+
+        if "изотони" in txt:
+            return "Изотоники"
+
+        if "квас" in txt:
+            return "Квас"
+
+        return "Газированные напитки"
+
+    return "Прочее"
+
+def extract_flavors(row):
+
+    txt = " ".join([
+        str(row.get("Общее наименование продукции", "")),
+        str(row.get("Наименование (обозначение) продукции", ""))
+    ])
+
+    txt = clean_text(txt)
 
     patterns = [
         r'со вкусом ([^,.;\n]+)',
@@ -115,21 +188,16 @@ def extract_flavors(text):
 
         for m in matches:
 
-            flavor = normalize_flavor(m)
+            f = normalize_flavor(m)
 
-            if (
-                len(flavor) > 1
-                and len(flavor.split()) <= 6
-                and flavor not in found
-            ):
-                found.append(flavor)
+            if len(f) > 1 and f not in found:
+                found.append(f)
 
-    # fallback only for short clean product names
     if not found:
 
         fallback = normalize_flavor(txt)
 
-        if len(fallback.split()) <= 4:
+        if len(fallback.split()) <= 5:
             found.append(fallback)
 
     return found
@@ -138,45 +206,41 @@ rows = []
 
 for _, row in df.iterrows():
 
-    flavors = extract_flavors(
-        row.get("Наименование (обозначение) продукции", "")
-    )
+    flavors = extract_flavors(row)
 
     for fl in flavors:
 
-        canonical = re.sub(
-            r'[^a-zа-я0-9]+',
-            '',
-            fl.lower()
-        )
-
         rows.append({
-            "Категория": category(row),
+            "Вид продукции": product_type(row),
             "Вкус": fl,
-            "key": category(row).lower() + "|" + canonical,
-            "Действие с": pd.to_datetime(row["Действие с"], errors="coerce"),
-            "Действие по": pd.to_datetime(row["Действие по"], errors="coerce"),
             "Номер ДС": str(row["Регистрационный номер"])
         })
 
 res = pd.DataFrame(rows)
 
+if len(res) == 0:
+    st.warning("Вкусы не найдены")
+    st.stop()
+
+res["key"] = (
+    res["Вид продукции"].str.lower()
+    + "|"
+    + res["Вкус"]
+        .str.lower()
+        .str.replace(r'[^a-zа-я0-9]+', '', regex=True)
+)
+
 final = (
     res.groupby("key")
     .agg({
-        "Категория": "first",
+        "Вид продукции": "first",
         "Вкус": "first",
-        "Действие с": "min",
-        "Действие по": "max",
         "Номер ДС": lambda x: ", ".join(sorted(set(x)))
     })
     .reset_index(drop=True)
 )
 
-final["Действие с"] = final["Действие с"].dt.strftime("%d.%m.%Y")
-final["Действие по"] = final["Действие по"].dt.strftime("%d.%m.%Y")
-
-final = final.sort_values(["Категория", "Вкус"])
+final = final.sort_values(["Вид продукции", "Вкус"])
 
 st.dataframe(final, use_container_width=True, height=800)
 
@@ -185,6 +249,6 @@ csv = final.to_csv(index=False).encode("utf-8-sig")
 st.download_button(
     "Скачать CSV",
     csv,
-    file_name="ds_flavors_v5.csv",
+    file_name="okved_flavors.csv",
     mime="text/csv"
 )
