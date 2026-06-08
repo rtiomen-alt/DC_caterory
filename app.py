@@ -1,377 +1,185 @@
-
-import streamlit as st
 import pandas as pd
+import json
 import re
+import time
+from pathlib import Path
+from typing import Dict, Tuple, Optional, List
+from tenacity import retry, stop_after_attempt, wait_exponential
 
-st.set_page_config(layout="wide", page_title="OKVED Flavor Service v5.0")
+# -------------------------------------------------------------------
+#  НАСТРОЙКИ (измените под себя)
+# -------------------------------------------------------------------
+FILE_PATH = "declarations.xls"          # путь к вашему файлу
+SHEET_NAME = 0                          # номер или имя листа
+OUTPUT_CSV = "unique_product_flavor.csv"
 
-st.title("OKVED Flavor Service v5.0 — SKU-based Classification")
+# Выберите движок: "openai" или "ollama"
+ENGINE = "ollama"      # "openai" или "ollama"
 
-ALLOWED_OKVED = ["11.07", "10.32", "11.03", "11.02"]
+# Параметры OpenAI (если ENGINE == "openai")
+OPENAI_API_KEY = "sk-..."               # ваш ключ
+OPENAI_MODEL = "gpt-3.5-turbo"          # или gpt-4
 
-uploaded = st.file_uploader(
-    "Загрузить XLS/XLSX/CSV",
-    type=["xls", "xlsx", "csv"]
-)
+# Параметры Ollama (если ENGINE == "ollama")
+OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_MODEL = "llama3"                 # или "qwen:7b", "mistral" и др.
 
-if uploaded is None:
-    st.stop()
+# Колонки в файле (возможные варианты названий)
+COLUMN_MAPPING = {
+    "group": ["Группа продукции", "Группа", "Категория"],
+    "general_name": ["Общее наименование продукции", "Общее наименование", "Наименование общее"],
+    "detailed_name": ["Наименование (обозначение) продукции", "Наименование продукции", "Наименование", "Продукция"]
+}
 
-if uploaded.name.endswith(".csv"):
-    df = pd.read_csv(uploaded)
-elif uploaded.name.endswith(".xls"):
-    df = pd.read_excel(uploaded, engine="xlrd")
-else:
-    df = pd.read_excel(uploaded, engine="openpyxl")
+# -------------------------------------------------------------------
+#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# -------------------------------------------------------------------
+def find_column(df: pd.DataFrame, possible_names: List[str]) -> str:
+    """Ищет реальное имя колонки по списку возможных вариантов."""
+    for name in possible_names:
+        if name in df.columns:
+            return name
+    raise KeyError(f"Не найдена ни одна из колонок: {possible_names}")
 
-df.columns = [str(c).strip() for c in df.columns]
+def build_context(row: pd.Series, group_col: str, general_col: str, detailed_col: str) -> str:
+    """Формирует текст для LLM из трёх колонок."""
+    parts = []
+    if pd.notna(row[group_col]):
+        parts.append(f"Группа продукции: {row[group_col]}")
+    if pd.notna(row[general_col]):
+        parts.append(f"Общее наименование продукции: {row[general_col]}")
+    if pd.notna(row[detailed_col]):
+        parts.append(f"Наименование (обозначение) продукции: {row[detailed_col]}")
+    return "\n".join(parts)
 
-df = df[
-    df["Тип заявителя"]
-    .astype(str)
-    .str.contains("Изготовитель", case=False, na=False)
-]
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+def call_openai(prompt: str) -> str:
+    """Отправка запроса к OpenAI API."""
+    from openai import OpenAI
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    response = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        response_format={"type": "json_object"}  # упрощает парсинг
+    )
+    return response.choices[0].message.content
 
-def clean_text(x):
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+def call_ollama(prompt: str) -> str:
+    """Отправка запроса к локальному Ollama."""
+    import requests
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json"   # просим JSON
+    }
+    response = requests.post(OLLAMA_URL, json=payload, timeout=60)
+    response.raise_for_status()
+    data = response.json()
+    return data.get("response", "")
 
-    if pd.isna(x):
-        return ""
+def parse_llm_output(raw_text: str) -> Tuple[Optional[str], Optional[str]]:
+    """Извлекает поля product и flavor из JSON-ответа."""
+    try:
+        # Пытаемся найти в ответе JSON (бывает, что модель добавляет пояснения)
+        json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group())
+        else:
+            data = json.loads(raw_text)
+        product = data.get("product")
+        flavor = data.get("flavor")
+        if flavor == "null" or flavor is None:
+            flavor = None
+        return product, flavor
+    except Exception as e:
+        print(f"Ошибка парсинга JSON: {e}\nОтвет: {raw_text[:200]}")
+        return None, None
 
-    x = str(x)
+def extract_pair(context: str) -> Tuple[Optional[str], Optional[str]]:
+    """Формирует промпт, вызывает LLM и возвращает (product, flavor)."""
+    prompt = f"""Ты — экспертный парсер пищевых деклараций.
 
-    x = re.sub(r'[«»“”"]', '', x)
+На основе контекста определи:
+- вид продукции (например, "йогурт", "сок", "конфета", "напиток", "вода", "чипсы")
+- вкус (если указан). Если вкуса нет или он не определяется, верни flavor: null.
 
-    x = x.replace("\n", " ")
-    x = x.replace("\r", " ")
+Правила:
+- Если в названии перечислено несколько вкусов (клубника-банан), верни их как есть.
+- Используй дополнительную информацию из групп продукции, если основное название неоднозначно.
+- Ответ дай строго в формате JSON: {{"product": "...", "flavor": ...}}
 
-    x = re.sub(r'\s+', ' ', x)
+Контекст:
+{context}
 
-    return x.strip()
+Ответ:
+"""
+    try:
+        if ENGINE == "openai":
+            raw = call_openai(prompt)
+        else:
+            raw = call_ollama(prompt)
+        return parse_llm_output(raw)
+    except Exception as e:
+        print(f"Ошибка при вызове LLM: {e}")
+        return None, None
 
-def extract_okved(row):
+# -------------------------------------------------------------------
+#  ОСНОВНОЙ ПРОЦЕСС
+# -------------------------------------------------------------------
+def main():
+    # 1. Загрузка файла
+    print(f"Загрузка файла {FILE_PATH}...")
+    df = pd.read_excel(FILE_PATH, sheet_name=SHEET_NAME, dtype=str)
+    print(f"Всего строк: {len(df)}")
 
-    cols = [c for c in df.columns if "оквэд" in c.lower()]
+    # 2. Определяем реальные имена колонок
+    try:
+        group_col = find_column(df, COLUMN_MAPPING["group"])
+        general_col = find_column(df, COLUMN_MAPPING["general_name"])
+        detailed_col = find_column(df, COLUMN_MAPPING["detailed_name"])
+        print(f"Колонки: группа='{group_col}', общее='{general_col}', детальное='{detailed_col}'")
+    except KeyError as e:
+        print(f"Ошибка: {e}. Доступные колонки: {list(df.columns)}")
+        return
 
-    txt = " ".join([
-        str(row.get(c, "")) for c in cols
-    ])
-
-    return re.findall(r'\d+\.\d+(?:\.\d+)?', txt)
-
-bad_okveds = set()
-
-for _, row in df.iterrows():
-
-    for okv in extract_okved(row):
-
-        valid = False
-
-        for allowed in ALLOWED_OKVED:
-            if okv.startswith(allowed):
-                valid = True
-                break
-
-        if not valid:
-            bad_okveds.add(okv)
-
-if bad_okveds:
-
-    st.error("Обнаружены ОКВЭД вне разрешенного списка")
-
-    st.dataframe(
-        pd.DataFrame({
-            "Неразрешенные ОКВЭД": sorted(bad_okveds)
-        }),
-        use_container_width=True
+    # 3. Формируем контекст для каждой строки
+    df["context"] = df.apply(
+        lambda row: build_context(row, group_col, general_col, detailed_col),
+        axis=1
     )
 
-    st.stop()
+    # 4. Дедупликация по контексту (чтобы не слать повторные запросы)
+    unique_contexts = df["context"].drop_duplicates().tolist()
+    print(f"Уникальных текстов для обработки: {len(unique_contexts)}")
 
-st.success("Все ОКВЭД разрешены")
-
-EN_RU = {
-    "cola": "кола",
-    "lemon": "лимон",
-    "lime": "лайм",
-    "orange": "апельсин",
-    "mango": "манго",
-    "mangosteen": "мангостин",
-    "bitter": "биттер",
-    "grapefruit": "грейпфрут",
-    "guava": "гуава",
-    "mint": "мята",
-    "strawberry": "клубника",
-    "tea": "чай",
-    "coffee": "кофе",
-}
-
-MORPH = {
-    "биттер лемон": "биттер лимон",
-    "вишни": "вишня",
-    "грейпфрута": "грейпфрут",
-    "гуавы": "гуава",
-    "мяты": "мята",
-    "зеленого яблока": "зеленое яблоко",
-    "клубники": "клубника",
-    "земляники": "земляника",
-    "лесные ягоды": "лесная ягода",
-    "лесных ягод": "лесная ягода",
-    "лимона": "лимон",
-    "лайма": "лайм",
-    "мангостина": "мангостин",
-    "манготина": "мангостин",
-    "апельсина": "апельсин",
-    "апельсиновый": "апельсин",
-    "колы": "кола",
-}
-
-PAIR_RULES = {
-    "лимон лайм": "лимон лайм",
-    "лимон и лайм": "лимон лайм",
-    "манго мангостин": "манго мангостин",
-    "манго и мангостин": "манго мангостин",
-    "клубника земляника": "клубника земляника",
-    "гуава мята": "гуава мята",
-}
-
-def normalize_flavor(x):
-
-    x = clean_text(x).lower()
-
-    for k, v in EN_RU.items():
-        x = x.replace(k, v)
-
-    for k, v in MORPH.items():
-        x = x.replace(k, v)
-
-    x = x.replace("-", " ")
-    x = x.replace("/", " ")
-    x = x.replace(" и ", " ")
-
-    x = re.sub(r'[^a-zа-я0-9\s]', ' ', x)
-    x = re.sub(r'\s+', ' ', x)
-
-    for k, v in PAIR_RULES.items():
-        if k in x:
-            x = v
-
-    words = []
-
-    for w in x.split():
-        if w not in words:
-            words.append(w)
-
-    x = " ".join(words)
-
-    return x.strip().title()
-
-def canonical_key(x):
-
-    x = normalize_flavor(x).lower()
-
-    x = re.sub(r'[^a-zа-я0-9]+', '', x)
-
-    return x
-
-TEA_MARKERS = [
-    "чай",
-    "ice tea",
-    "green tea",
-    "black tea",
-    "матча",
-    "улун",
-    "пуэр",
-    "каркаде",
-]
-
-COFFEE_MARKERS = [
-    "кофе",
-    "латте",
-    "капучино",
-    "espresso",
-    "эспрессо",
-    "cold brew",
-    "раф",
-]
-
-ENERGY_MARKERS = [
-    "энергетичес",
-    "energy drink",
-    "тонизирующ",
-]
-
-ISOTONIC_MARKERS = [
-    "изотони",
-    "isotonic",
-    "electrolyte",
-]
-
-def split_into_skus(text):
-
-    text = clean_text(text)
-
-    parts = re.split(r';|•|\n', text)
-
-    result = []
-
-    for p in parts:
-
-        p = p.strip()
-
-        if len(p) < 3:
+    # 5. Кэш: текст -> (product, flavor)
+    cache = {}
+    for i, ctx in enumerate(unique_contexts):
+        if not ctx.strip():
+            cache[ctx] = (None, None)
             continue
+        print(f"Обработка {i+1}/{len(unique_contexts)}...")
+        product, flavor = extract_pair(ctx)
+        cache[ctx] = (product, flavor)
+        time.sleep(0.5)  # пауза, чтобы не перегружать LLM
 
-        result.append(p)
+    # 6. Применяем кэш к исходному DataFrame и собираем уникальные пары
+    df["product"] = df["context"].apply(lambda x: cache[x][0])
+    df["flavor"] = df["context"].apply(lambda x: cache[x][1])
 
-    return result
+    # 7. Формируем результирующий массив уникальных пар (игнорируем None-продукты)
+    pairs = df[["product", "flavor"]].drop_duplicates()
+    pairs = pairs[pairs["product"].notna()]
 
-def classify_sku(sku, okveds):
+    # 8. Сохраняем
+    pairs.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+    print(f"Готово! Найдено уникальных пар: {len(pairs)}")
+    print(f"Результат сохранён в {OUTPUT_CSV}")
+    print("\nПримеры:")
+    print(pairs.head(10).to_string(index=False))
 
-    sku_l = sku.lower()
-
-    for m in ENERGY_MARKERS:
-        if m in sku_l:
-            return "Энергетические безалкогольные напитки"
-
-    for m in ISOTONIC_MARKERS:
-        if m in sku_l:
-            return "Спортивные изотонические напитки"
-
-    for m in TEA_MARKERS:
-        if m in sku_l:
-            return "Холодные чаи и кофейные напитки"
-
-    for m in COFFEE_MARKERS:
-        if m in sku_l:
-            return "Холодные чаи и кофейные напитки"
-
-    if any(x.startswith("11.07") for x in okveds):
-        return "Газированные и негазированные сладкие напитки"
-
-    if any(x.startswith("10.32") for x in okveds):
-
-        if "морс" in sku_l:
-            return "Морсы"
-
-        if "концентрат" in sku_l:
-            return "Концентраты"
-
-        return "Фруктовые и овощные соки"
-
-    if any(x.startswith("11.03") for x in okveds):
-
-        if "сидр" in sku_l:
-            return "Сидры"
-
-        if "медовух" in sku_l:
-            return "Медовуха"
-
-        return "Плодово ягодные напитки"
-
-    if any(x.startswith("11.02") for x in okveds):
-
-        if "игрист" in sku_l or "шампан" in sku_l:
-            return "Игристые и шампанское"
-
-        return "Вина"
-
-    return "Прочее"
-
-def extract_flavor_from_sku(sku):
-
-    txt = sku.lower()
-
-    patterns = [
-        r'со вкусом ([^,.;]+)',
-        r'вкус ([^,.;]+)',
-        r'аромат ([^,.;]+)',
-        r'([а-яa-z\s]+чай[а-яa-z\s]*)',
-    ]
-
-    for p in patterns:
-
-        matches = re.findall(p, txt, flags=re.IGNORECASE)
-
-        if matches:
-
-            flavor = normalize_flavor(matches[0])
-
-            if len(flavor) > 1:
-                return flavor
-
-    txt = re.sub(
-        r'напиток|безалкогольный|газированный|негазированный',
-        '',
-        txt
-    )
-
-    txt = normalize_flavor(txt)
-
-    words = txt.split()
-
-    if len(words) > 5:
-        txt = " ".join(words[:5])
-
-    return txt
-
-rows = []
-
-for _, row in df.iterrows():
-
-    full_text = " ".join([
-        str(row.get("Общее наименование продукции", "")),
-        str(row.get("Наименование (обозначение) продукции", ""))
-    ])
-
-    skus = split_into_skus(full_text)
-
-    okveds = extract_okved(row)
-
-    for sku in skus:
-
-        product_type = classify_sku(sku, okveds)
-
-        flavor = extract_flavor_from_sku(sku)
-
-        if len(flavor.strip()) < 2:
-            continue
-
-        rows.append({
-            "Вид продукции": product_type,
-            "Вкус": flavor,
-            "CanonicalKey": (
-                product_type.lower()
-                + "|"
-                + canonical_key(flavor)
-            ),
-            "Номер ДС": str(row["Регистрационный номер"])
-        })
-
-res = pd.DataFrame(rows)
-
-final = (
-    res.groupby("CanonicalKey")
-    .agg({
-        "Вид продукции": "first",
-        "Вкус": "first",
-        "Номер ДС": lambda x: ", ".join(sorted(set(x)))
-    })
-    .reset_index(drop=True)
-)
-
-final = final.sort_values(["Вид продукции", "Вкус"])
-
-st.dataframe(
-    final,
-    use_container_width=True,
-    height=900
-)
-
-csv = final.to_csv(index=False).encode("utf-8-sig")
-
-st.download_button(
-    "Скачать CSV",
-    csv,
-    file_name="okved_flavors_v50.csv",
-    mime="text/csv"
-)
+if __name__ == "__main__":
+    main()
